@@ -4,7 +4,7 @@
 
 | Project | Knows about | Why |
 | --- | --- | --- |
-| `Inventory.Domain` | nothing (no NuGet packages) | Business rules can be unit tested in microseconds and cannot accidentally do I/O. |
+| `Inventory.Domain` | nothing (no NuGet packages) | Business rules can be unit tested without I/O. |
 | `Inventory.Application` | Domain, FluentValidation, logging abstractions | Use cases (place order, receive stock...) plus *ports*: `IProductRepository`, `IStockRepository`, `IOrderRepository`, `IAlertRepository`, `IUnitOfWork`. |
 | `Inventory.Infrastructure` | Application, EF Core, SQLite, Npgsql | Implements the ports and translates EF/provider exceptions into application exceptions. |
 | `Inventory.Api` | everything (composition root) | HTTP only: routing, validation filter, auth, ProblemDetails, OpenAPI, health. |
@@ -15,7 +15,7 @@
   directly. Then the invariants live in two places.
 - *Application depends on `DbContext` directly* (a popular pragmatic variant): fewer files, but
   Application tests would need a database, and `DbUpdateConcurrencyException` would leak into use-case
-  code. The repositories here are deliberately thin (5-6 methods each).
+  code. The repositories here are deliberately thin.
 - *MediatR / CQRS pipeline*: adds indirection that a service with this many use cases does not need.
   Plain service classes are easier to trace when reading the code.
 
@@ -212,7 +212,7 @@ apps). The subclass approach is lighter for a two-provider project.
   because the app never opens its own transactions: each `SaveChanges` is one implicit transaction.
   `ConcurrencyRetry` still handles optimistic-concurrency conflicts, which are not transient. The
   connection string uses the server admin login, which is more privilege than the app needs; a
-  dedicated role with only DML rights on the four tables (migrations run separately) is listed below.
+  dedicated role with only DML rights on the application tables (migrations run separately) is listed below.
 
 ## Planned work
 

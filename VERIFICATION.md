@@ -84,3 +84,65 @@ the recorded Linux environment.
   count fail on a duplicate alert. A product-level concurrency token and retryable unique-index
   conflicts force a fresh decision. Regressions: `ConcurrentCountsAtTwoLocations_BothSucceed_WithExactlyOneOpenAlert`,
   `EveryEvaluation_BumpsProductVersion_SoConcurrentEvaluationsConflict` and `ModelTests` (row 12).
+
+## 2026-10-03 local verification
+
+Environment: restricted macOS arm64 sandbox, .NET SDK 8.0.425, runtime 8.0.31 and local dotnet-ef
+8.0.31. These results supplement the earlier Linux measurements; no new full-suite or coverage
+measurement is claimed.
+
+Commands used writable temporary .NET/NuGet caches. Default parallel MSBuild attempts stalled or
+reported forbidden named-pipe socket binds. Later commands used `DOTNET_PROCESSOR_COUNT=1`,
+`UseSharedCompilation=false` and disabled node reuse; workload update checks were disabled locally.
+These settings were not added to the repository. Online restore still required unreachable NuGet
+vulnerability data. A separate restore used the existing local package feed with `NuGetAudit=false`
+for that invocation only, retaining locked mode and every committed package version. This fallback
+verifies dependency restoration, not the online vulnerability audit.
+
+| Check / command | Result | Evidence |
+| --- | --- | --- |
+| `dotnet restore --locked-mode && dotnet format --verify-no-changes --no-restore` | BLOCKED | Restore exits 1 with `NU1900`: vulnerability data from `https://api.nuget.org/v3/index.json` is unreachable. The chained formatter does not run. An initial default-parallel attempt timed out |
+| `dotnet restore --locked-mode --source <local-feed> -p:NuGetAudit=false` | PASS | All seven projects restored; no lockfile or dependency version changes. Online audit remains BLOCKED |
+| `dotnet format --verify-no-changes --no-restore` (separate command after offline restore) | PASS | Exit 0 |
+| `dotnet build --configuration Release --no-restore -warnaserror` | PASS | All seven projects built; `0 Warning(s)`, `0 Error(s)`, using the local process settings above. Default parallel invocation timed out |
+| `dotnet test --configuration Release --no-build` | BLOCKED | All three test runs abort before assertions: VSTest's `SocketServer.Start` / `TcpListener.Start` throws `SocketException (13): Permission denied`. No test pass count is claimed |
+| `dotnet tool restore --configfile <offline-config>` | PASS | Local dotnet-ef 8.0.31 restored from the existing feed |
+| `dotnet ef migrations has-pending-model-changes --project src/Inventory.Infrastructure --startup-project src/Inventory.Infrastructure --context SqliteInventoryDbContext --configuration Release --no-build` | PASS | `No changes have been made to the model since the last migration.` |
+| Same migration check with `--context PostgresInventoryDbContext` | PASS | `No changes have been made to the model since the last migration.` |
+| Native Development startup and HTTP probes | BLOCKED | Initial plain `dotnet run --project src/Inventory.Api` readiness attempt timed out at 35 seconds. With the polling-watcher workaround below, the launch profile selects Development, applies SQLite migrations and attempts `http://localhost:5000`; Kestrel then throws `Permission denied` on bind. No curl response, Swagger or readiness pass is claimed |
+| SQLite startup migration history | PASS | The scratch database from the launch-profile run contains `InitialCreate` and `AddProductVersion`, proving startup migrations ran without an explicit environment prefix |
+| Release coverage and PostgreSQL integration tests | BLOCKED | VSTest cannot open its communication socket; Docker access is also denied. These steps were not repeated after the prerequisite failures |
+| `docker info --format '{{.ServerVersion}}'`; Docker build / container smoke | BLOCKED | Docker daemon socket access is denied. Build and smoke were not attempted after this probe |
+| Bicep build / lint | NOT_RUN | Neither Bicep nor Azure CLI is installed; no global installation performed |
+| Workflow YAML parse | NOT_RUN | PyYAML is unavailable; the existing workflow was not changed |
+| Launch-profile JSON, README shell syntax / local links, Quickstart command count | PASS | JSON parses; Development and port 5000 match the README; every Bash block passes `bash -n`; local links resolve; Quickstart has five commands |
+| Repository hygiene and `git diff --check` | PASS | Existing `.editorconfig` and `.gitignore` cover build, test, coverage and SQLite output. No generated build/database junk is tracked; LICENSE and dependency versions are unchanged; diff has no whitespace errors |
+| GitHub Actions execution / Azure deployment | NOT_RUN | No remote workflow was triggered and no infrastructure was deployed |
+
+### Native startup diagnosis
+
+The earlier native startup timeout was reproduced in a disposable, dependency-free ASP.NET Core
+probe: it printed immediately before `WebApplication.CreateBuilder` and then stalled there.
+`DOTNET_USE_POLLING_FILE_WATCHER=1` let that same probe complete host construction, after which its
+Kestrel socket bind was denied. The same per-process setting let stockroom apply its migrations and
+reach the identical binding restriction. Both the direct DLL and the launch-profile run were tried;
+no source instrumentation or watcher configuration was committed.
+
+Independent system probes confirmed a local TCP bind returns `Operation not permitted` and
+`getdomainname()` returns `-1`, errno `1`. The latter also explains the earlier restricted macOS
+`CookieContainer` errors. These are environment limitations, not failing domain assertions. The
+startup and full HTTP checks still need an unrestricted environment; the Quickstart response is an
+illustrative response matching the contracts, not a response captured in this sandbox.
+
+Logs and scratch databases are outside the repository in `/private/tmp/stockroomRT`. Native startup
+process groups were stopped. No commits, pushes, branch creation, runtime dependency additions or global
+installations were performed.
+
+## Host re-run (2026-10-03, macOS arm64, .NET SDK 8.0.425 selected by global.json)
+
+| Check | Result | Evidence |
+|---|---|---|
+| `dotnet restore --locked-mode && dotnet format --verify-no-changes --no-restore` | PASS | No changes needed. |
+| `dotnet build --configuration Release --no-restore -warnaserror` | PASS | 0 warnings. |
+| `dotnet test --configuration Release --no-build` (SQLite) | PASS | 48 domain + 7 application + 44 integration = 99 passed, 0 failed. |
+| `dotnet run --project src/Inventory.Api` (no environment variable) | PASS | Uses the committed `launchSettings.json`: "Hosting environment: Development", listening on `http://localhost:5000`, `/swagger/index.html` returns 200. |

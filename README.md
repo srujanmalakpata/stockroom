@@ -1,13 +1,118 @@
 # stockroom
 
-A warehouse inventory REST API for products, stock per bin location, order reservations, fulfilment, cancellation and low-stock alerts.
+A warehouse inventory REST API that reserves, fulfils and cancels orders without overselling stock, with automatic low-stock alerts.
 
-Orders reserve stock when placed; fulfilment ships it and cancellation releases it. The domain model
-guarantees stock never goes negative, an order reserves all of its lines or none of them, and EF Core
-optimistic concurrency tokens with a retry loop prevent simultaneous orders from overselling the same
-units. Integration tests cover this on SQLite and PostgreSQL. The code uses four layers (Domain /
-Application / Infrastructure / Api), EF Core migrations for both providers, a multi-stage non-root
-Dockerfile, Azure Bicep infrastructure (validated, never deployed) and a GitHub Actions pipeline.
+[![CI](https://github.com/srujanmalakpata/stockroom/actions/workflows/ci.yml/badge.svg)](https://github.com/srujanmalakpata/stockroom/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![C# 12](https://img.shields.io/badge/C%23-12-512BD4.svg)](Directory.Build.props)
+[![.NET 8](https://img.shields.io/badge/.NET-8-512BD4.svg)](global.json)
+
+## Highlights
+
+- **99 passing tests; 94.7% Release line coverage** in the recorded Linux run, spanning domain,
+  application and HTTP integration tests ([verification, rows 4–5](VERIFICATION.md)).
+- **All-or-nothing reservations:** allocation is planned before any stock mutation;
+  `Place_WhenAnyLineIsShort_ReservesNothing` guards this guarantee ([OrderTests](tests/Inventory.Domain.Tests/OrderTests.cs)).
+- **Oversell protection under contention:** 12 simultaneous orders requesting 3 units each against
+  10 units produce exactly 3 successful orders; concurrency tokens and fresh-state retries enforce it
+  ([ConcurrencyTests](tests/Inventory.Api.IntegrationTests/ConcurrencyTests.cs), [verification, rows 9–10](VERIFICATION.md)).
+- **Low-stock write-skew protection:** a product-level token serialises decisions across different
+  bins, backed by `EveryEvaluation_BumpsProductVersion_SoConcurrentEvaluationsConflict` and a partial
+  unique index for open alerts ([verification, row 12](VERIFICATION.md)).
+- **Two real database providers:** separate SQLite and PostgreSQL migrations, with the same 44
+  integration tests passing on PostgreSQL in 5 repeated Linux runs; a non-root Docker image and
+  Azure Bicep complete the packaging ([verification, rows 8–9 and 15–21](VERIFICATION.md)).
+
+**Tech stack:** C# 12 · .NET 8 Minimal APIs · EF Core 8 · SQLite / PostgreSQL 16 · FluentValidation ·
+xUnit / Coverlet · OpenAPI · Docker · Azure Bicep · GitHub Actions.
+
+**Validation:** measurements above come from the recorded Linux run. Local checks and environment
+limits are documented in [VERIFICATION.md](VERIFICATION.md). Azure infrastructure was compiled and
+linted only; it has never been deployed. The project has no production users.
+
+## Quickstart
+
+Requirements: Git, curl and the .NET 8 SDK (`global.json` requires 8.0.400 or a later .NET 8 feature band).
+
+```bash
+git clone https://github.com/srujanmalakpata/stockroom.git
+cd stockroom
+dotnet restore --locked-mode
+dotnet run --project src/Inventory.Api
+```
+
+The launch profile selects Development on **http://localhost:5000**, applies SQLite migrations and
+loads the development API key. Open **http://localhost:5000/swagger** to explore the API. In a second
+terminal, create a product:
+
+```bash
+curl -i http://localhost:5000/api/products \
+  -H 'X-Api-Key: dev-only-key-not-a-secret' -H 'Content-Type: application/json' \
+  -d '{"sku":"widget-1","name":"Widget","reorderThreshold":5}'
+```
+
+Example **201 Created** response (the generated `id` varies):
+
+```json
+{
+  "id": "c238bb20-2a46-46df-8069-446f0ca04d21",
+  "sku": "WIDGET-1",
+  "name": "Widget",
+  "reorderThreshold": 5,
+  "onHand": 0,
+  "reserved": 0,
+  "available": 0,
+  "isLowStock": true,
+  "locations": []
+}
+```
+
+A product with no stock and a positive threshold immediately raises a low-stock alert. Repeating the
+same SKU returns **409 `duplicate_sku`**. SQLite data is kept in `src/Inventory.Api/inventory.db`.
+
+## Contents
+
+[Architecture](#architecture) · [Features](#features) · [Usage](#usage) · [API](#api) ·
+[Testing](#testing) · [Measured results](#results-measured) · [Limitations](#limitations) · [License](#license)
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Client -->|HTTP + X-Api-Key| Api
+    subgraph Api [Inventory.Api]
+      E[Minimal API endpoints] --> V[Validation filter]
+      E --> X[ProblemDetails exception handler]
+    end
+    Api --> App
+    subgraph App [Inventory.Application]
+      S[ProductService / StockService / OrderService] --> R[ConcurrencyRetry]
+      S --> L[LowStockMonitor]
+      S --> P[(Repository + UnitOfWork ports)]
+    end
+    App --> Dom
+    subgraph Dom [Inventory.Domain - no dependencies]
+      O[Order + AllocationPolicy] --> SI[StockItem invariants]
+      LP[LowStockPolicy]
+    end
+    Infra[Inventory.Infrastructure<br/>EF Core DbContext, repositories,<br/>SQLite / PostgreSQL migrations] -. implements .-> P
+    Infra --> DB[(SQLite or PostgreSQL)]
+```
+
+Dependencies point inward. Domain references nothing. Application references Domain and defines the
+persistence interfaces. Infrastructure implements them with EF Core. Api composes everything.
+
+```
+POST /api/orders ─► ValidationFilter ─► OrderService.PlaceAsync ─► ConcurrencyRetry
+     ├─ load products + all StockItems for them (fulfil/cancel read the stock before the order)
+     ├─ Order.Place(...)  → AllocationPolicy plans every line, then StockItem.Reserve(...)
+     ├─ LowStockMonitor.EvaluateAsync(...)  → bump Product.Version, maybe stage a LowStockAlert
+     └─ UnitOfWork.SaveChanges → UPDATE StockItems / Products ... WHERE Id=@id AND Version=@old
+            0 rows, or a racing insert on a unique index?
+            → ConcurrencyConflictException → discard tracked state, retry from the top
+```
+
+Design tradeoffs and provider details are documented in [DESIGN.md](DESIGN.md).
 
 ## Features
 
@@ -51,25 +156,17 @@ Dockerfile, Azure Bicep infrastructure (validated, never deployed) and a GitHub 
   migration-drift check, tests plus coverage, a PostgreSQL job, a Docker job and a Bicep job. There is
   no deployment stage.
 
-## Quick start
+## Usage
 
-Requirements: .NET 8 SDK (`global.json` pins 8.0.4xx with roll-forward).
-
-```bash
-dotnet tool restore                      # dotnet-ef (local tool)
-DOTNET_ENVIRONMENT=Development dotnet run --project src/Inventory.Api
-# SQLite file, migrations applied, Swagger on
-```
+Receive stock and place an order (in the second terminal; replace `PRODUCT_ID` with the returned id):
 
 ```bash
-KEY='dev-only-key-not-a-secret'          # development placeholder from appsettings.Development.json
-URL=http://localhost:5000                # use the URL printed by `dotnet run`
-curl -s -X POST $URL/api/products -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
-  -d '{"sku":"widget-1","name":"Widget","reorderThreshold":5}'
-PRODUCT_ID='<id>'                       # replace with the id returned by product creation
+KEY='dev-only-key-not-a-secret'
+URL=http://localhost:5000
+PRODUCT_ID='<id>'
 curl -s -X POST "$URL/api/products/$PRODUCT_ID/stock/receipts" -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
   -d '{"locationCode":"A-01","quantity":8}'
-curl -s -X POST $URL/api/orders -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+curl -s -X POST "$URL/api/orders" -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
   -d "{\"customerReference\":\"C-1\",\"lines\":[{\"productId\":\"$PRODUCT_ID\",\"quantity\":5}]}"
 ```
 
@@ -78,7 +175,7 @@ PostgreSQL instead of SQLite:
 ```bash
 Database__Provider=Postgres \
 ConnectionStrings__Inventory='Host=localhost;Database=inventory;Username=postgres;Password=...' \
-DOTNET_ENVIRONMENT=Development dotnet run --project src/Inventory.Api
+dotnet run --project src/Inventory.Api
 ```
 
 Docker:
@@ -88,53 +185,15 @@ docker build -t stockroom .
 docker run -p 8080:8080 -e Database__MigrateOnStartup=true -e Auth__ApiKeys__0="$(openssl rand -hex 24)" stockroom
 ```
 
-New migration (one per provider):
+New migration (one per provider; restore the local EF tool first):
 
 ```bash
+dotnet tool restore
 dotnet ef migrations add MigrationName --project src/Inventory.Infrastructure --startup-project src/Inventory.Infrastructure \
   --context SqliteInventoryDbContext --output-dir Persistence/Migrations/Sqlite
 dotnet ef migrations add MigrationName --project src/Inventory.Infrastructure --startup-project src/Inventory.Infrastructure \
   --context PostgresInventoryDbContext --output-dir Persistence/Migrations/Postgres
 ```
-
-## Architecture
-
-```mermaid
-flowchart LR
-    Client -->|HTTP + X-Api-Key| Api
-    subgraph Api [Inventory.Api]
-      E[Minimal API endpoints] --> V[Validation filter]
-      E --> X[ProblemDetails exception handler]
-    end
-    Api --> App
-    subgraph App [Inventory.Application]
-      S[ProductService / StockService / OrderService] --> R[ConcurrencyRetry]
-      S --> L[LowStockMonitor]
-      S --> P[(Repository + UnitOfWork ports)]
-    end
-    App --> Dom
-    subgraph Dom [Inventory.Domain - no dependencies]
-      O[Order + AllocationPolicy] --> SI[StockItem invariants]
-      LP[LowStockPolicy]
-    end
-    Infra[Inventory.Infrastructure<br/>EF Core DbContext, repositories,<br/>SQLite / PostgreSQL migrations] -. implements .-> P
-    Infra --> DB[(SQLite or PostgreSQL)]
-```
-
-Dependencies point inward. Domain references nothing. Application references Domain and defines the
-persistence interfaces. Infrastructure implements them with EF Core. Api composes everything.
-
-```
-POST /api/orders ─► ValidationFilter ─► OrderService.PlaceAsync ─► ConcurrencyRetry
-     ├─ load products + all StockItems for them (fulfil/cancel read the stock before the order)
-     ├─ Order.Place(...)  → AllocationPolicy plans every line, then StockItem.Reserve(...)
-     ├─ LowStockMonitor.EvaluateAsync(...)  → bump Product.Version, maybe stage a LowStockAlert
-     └─ UnitOfWork.SaveChanges → UPDATE StockItems / Products ... WHERE Id=@id AND Version=@old
-            0 rows, or a racing insert on a unique index?
-            → ConcurrencyConflictException → discard tracked state, retry from the top
-```
-
-Design tradeoffs and provider details are documented in [DESIGN.md](DESIGN.md).
 
 ## API
 
@@ -214,9 +273,9 @@ Shared 4-vCPU Linux container (Ubuntu 24.04), .NET SDK 8.0.425, 2026-10-03. Full
 - The project has no users and no production deployment.
 - Concurrency results come from in-process tests with simultaneous HTTP requests; this is not a load
   test and no throughput numbers are claimed.
-- A macOS arm64 SQLite integration run fails during `CookieContainer` initialisation with
-  `GetDomainName: -1`; affected HTTP tests do not reach their assertions. The passing integration
-  results above are specific to Linux; see [VERIFICATION.md](VERIFICATION.md#macos-integration-limitation).
+- The coverage and PostgreSQL figures above come from the recorded Linux run. On macOS arm64 the
+  SQLite suite (99/99) and the `dotnet run` smoke check also pass; see
+  [VERIFICATION.md](VERIFICATION.md#host-re-run-2026-10-03-macos-arm64-net-sdk-80425-selected-by-globaljson).
 - Application Insights export via OpenTelemetry (`UseAzureMonitor`) is configured behind a connection
   string but was never exercised.
 - **Not deployed.** The Bicep template was compiled and linted offline only. No Azure resources were
