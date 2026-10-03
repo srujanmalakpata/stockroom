@@ -1,0 +1,13 @@
+**/bin/
+**/obj/
+**/TestResults/
+**/*.db
+**/*.db-*
+.git/
+.github/
+.vs/
+.vscode/
+infra/
+tests/
+coverage/
+*.md

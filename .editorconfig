@@ -1,0 +1,33 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{json,yml,yaml,props,csproj,bicep}]
+indent_size = 2
+
+[*.cs]
+# Style preferences enforced by `dotnet format` and the build (EnforceCodeStyleInBuild).
+csharp_style_namespace_declarations = file_scoped:warning
+csharp_prefer_braces = true:warning
+dotnet_sort_system_directives_first = true
+csharp_style_var_for_built_in_types = true:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+csharp_style_var_elsewhere = true:suggestion
+dotnet_diagnostic.IDE0005.severity = warning # unnecessary using
+
+# EF Core migrations are generated code.
+[**/Migrations/**.cs]
+generated_code = true
+dotnet_diagnostic.IDE0005.severity = none
+
+[tests/**.cs]
+# xUnit test names use underscores: Method_State_Expected.
+dotnet_diagnostic.CA1707.severity = none
+# Test code awaits directly on the xUnit synchronization context.
+dotnet_diagnostic.CA2007.severity = none

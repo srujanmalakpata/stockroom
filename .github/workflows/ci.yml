@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+
+jobs:
+  build-test:
+    name: Format, build, test (SQLite) + coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Restore (locked)
+        run: |
+          dotnet tool restore
+          dotnet restore --locked-mode
+
+      - name: Check formatting
+        run: dotnet format --verify-no-changes --no-restore
+
+      - name: Build (warnings are errors)
+        run: dotnet build --configuration Release --no-restore -warnaserror
+
+      # Catches schema drift (a model change without a migration). It cannot see concurrency-token
+      # settings, which change the UPDATE SQL but not the schema; ModelTests guards those.
+      - name: Check EF migrations are up to date
+        run: |
+          for context in SqliteInventoryDbContext PostgresInventoryDbContext; do
+            dotnet ef migrations has-pending-model-changes \
+              --project src/Inventory.Infrastructure --startup-project src/Inventory.Infrastructure \
+              --context "$context" --configuration Release --no-build
+          done
+
+      - name: Test with coverage
+        run: >
+          dotnet test --configuration Release --no-build
+          --settings coverlet.runsettings
+          --collect:"XPlat Code Coverage"
+          --results-directory coverage
+          --logger "trx;LogFilePrefix=results"
+
+      # Runs after a test failure too (the report is still useful), but not when the build failed
+      # and there is no coverage file to summarise.
+      - name: Coverage summary
+        if: (success() || failure()) && hashFiles('coverage/**/coverage.cobertura.xml') != ''
+        run: |
+          dotnet tool install --global dotnet-reportgenerator-globaltool --version 5.4.4
+          reportgenerator -reports:"coverage/**/coverage.cobertura.xml" -targetdir:coverage/report \
+            -reporttypes:"MarkdownSummaryGithub;Cobertura"
+          cat coverage/report/SummaryGithub.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-and-coverage
+          path: coverage/
+          retention-days: 14
+
+  postgres-integration:
+    name: Integration tests (PostgreSQL 16)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Throwaway credentials for the CI service container only.
+      INVENTORY_TEST_POSTGRES: Host=localhost;Port=5432;Username=postgres;Password=postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Restore (locked)
+        run: dotnet restore tests/Inventory.Api.IntegrationTests --locked-mode
+
+      - name: Test against PostgreSQL
+        run: dotnet test tests/Inventory.Api.IntegrationTests --configuration Release --no-restore
+
+  docker:
+    name: Docker image build + smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build --tag stockroom:ci .
+
+      - name: Run container and probe health
+        run: |
+          docker run --detach --name api --publish 8080:8080 \
+            --env Database__MigrateOnStartup=true stockroom:ci
+          for i in $(seq 1 30); do
+            if curl --silent --fail http://localhost:8080/health/ready; then echo; exit 0; fi
+            sleep 1
+          done
+          docker logs api
+          exit 1
+
+      - name: Verify container runs as non-root
+        run: test "$(docker exec api id -u)" != "0"
+
+  bicep:
+    name: Validate Azure Bicep (no deployment)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and lint Bicep
+        run: |
+          # Pinned to the version used for local validation, so new linter rules cannot break CI unannounced.
+          az bicep install --version v0.37.4
+          az bicep version
+          az bicep build --file infra/main.bicep --stdout > /dev/null
+          az bicep lint --file infra/main.bicep

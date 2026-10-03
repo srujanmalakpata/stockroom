@@ -1,0 +1,37 @@
+# .NET build output
+bin/
+obj/
+publish/
+out/
+*.user
+*.suo
+.vs/
+.vscode/
+.idea/
+
+# Tests and coverage
+TestResults/
+coverage/
+coverage-report/
+*.coverage
+*.cobertura.xml
+coverage.*.xml
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite*
+
+# Bicep compiled output (CI regenerates it)
+infra/*.json
+!infra/*.parameters.json
+
+# Local secrets / environment
+.env
+.env.*
+!.env.example
+appsettings.Local.json
+
+# Tool caches created by local verification runs
+.uv-cache/
