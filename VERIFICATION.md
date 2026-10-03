@@ -138,7 +138,7 @@ Logs and scratch databases are outside the repository in `/private/tmp/stockroom
 process groups were stopped. No commits, pushes, branch creation, runtime dependency additions or global
 installations were performed.
 
-## Host re-run (2026-10-03, macOS arm64, .NET SDK 10.0.401 targeting net8.0)
+## Host re-run (2026-10-03, macOS arm64, .NET SDK 8.0.425 selected by global.json)
 
 | Check | Result | Evidence |
 |---|---|---|

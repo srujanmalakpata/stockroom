@@ -273,10 +273,9 @@ Shared 4-vCPU Linux container (Ubuntu 24.04), .NET SDK 8.0.425, 2026-10-03. Full
 - The project has no users and no production deployment.
 - Concurrency results come from in-process tests with simultaneous HTTP requests; this is not a load
   test and no throughput numbers are claimed.
-- The restricted macOS verification environment denies local socket binds and `getdomainname`.
-  Tests and HTTP smoke checks are blocked before assertions; formatting, Release compilation and
-  both migration-drift checks pass. The passing integration results above are specific to Linux;
-  see [VERIFICATION.md](VERIFICATION.md#2026-10-03-local-verification).
+- The coverage and PostgreSQL figures above come from the recorded Linux run. On macOS arm64 the
+  SQLite suite (99/99) and the `dotnet run` smoke check also pass; see
+  [VERIFICATION.md](VERIFICATION.md#host-re-run-2026-10-03-macos-arm64-net-sdk-80425-selected-by-globaljson).
 - Application Insights export via OpenTelemetry (`UseAzureMonitor`) is configured behind a connection
   string but was never exercised.
 - **Not deployed.** The Bicep template was compiled and linted offline only. No Azure resources were
